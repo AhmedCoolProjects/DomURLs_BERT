@@ -37,12 +37,12 @@ class BERTDataset(Dataset):
         __len__(): Returns the length of the dataset.
         __getitem__(index): Retrieves a sample from the dataset at the given index.
     """
-    def __init__(self, texts, labels, max_length=80, pretrained_path='amahdaouy/BERT_DOMURLS'):
+    def __init__(self, texts, labels, max_length=80, pretrained_path='amahdaouy/DomURLs_BERT'):
         self.texts = texts
         self.labels = labels
         self.max_length = max_length
         self.length = len(self.labels)
-        self.preprocess_input = True if pretrained_path=='amahdaouy/BERT_DOMURLS' else False
+        self.preprocess_input = True if pretrained_path=='amahdaouy/DomURLs_BERT' else False
         self.tokenizer = None
         if 'urlbert' in pretrained_path.lower():
             self.tokenizer =  BertTokenizer(f"{directory_path}/urlbert_vocab/vocab.txt")
