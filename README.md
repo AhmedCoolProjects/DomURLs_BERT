@@ -93,6 +93,24 @@ python main_charnn.py \
 ## Citation
 
 ```bibtex
+@article{ElMahdaouy2026DomURLsBERT,
+  author  = {{El Mahdaouy}, Abdelkader and
+             Lamsiyah, Salima and
+             Janati Idrissi, Meryem and
+             Alami, Hamza and
+             Yartaoui, Zakaria and
+             Berrada, Ismail},
+  title   = {{DomURLs\_BERT}: Pre-trained BERT-based Model for Malicious Domains and URLs Detection and Classification},
+  journal = {Journal of Network and Systems Management},
+  year    = {2026},
+  volume  = {34},
+  number  = {2},
+  pages   = {36},
+  doi     = {10.1007/s10922-025-10010-9},
+  url     = {https://doi.org/10.1007/s10922-025-10010-9},
+  issn    = {1573-7705},
+}
+
 @article{domurlsbert2024,
   title={{DomURLs\_BERT}: Pre-trained BERT-based Model for Malicious Domains and URLs Detection and Classification},
   author={Abdelkader {El Mahdaouy} and Salima Lamsiyah and Meryem {Janati Idrissi} and Hamza Alami and Zakaria Yartaoui and Ismail Berrada},
