@@ -19,6 +19,13 @@ from sklearn.metrics import accuracy_score, classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import LinearSVC
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    _WANDB_AVAILABLE = False
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Columns in the meta CSVs that are not features.
@@ -51,7 +58,7 @@ def load_split(dataset_dir: Path, meta_dir: Path, split: str, label_column: str)
     return merged, X_meta, merged[label_column].values, feature_cols
 
 
-def evaluate(name: str, clf, X_dev, y_dev, X_test, y_test, label_names):
+def evaluate(name: str, clf, X_dev, y_dev, X_test, y_test, label_names, wandb_run=None):
     out = {}
     for split_name, X, y in (("dev", X_dev, y_dev), ("test", X_test, y_test)):
         y_pred = clf.predict(X)
@@ -71,6 +78,16 @@ def evaluate(name: str, clf, X_dev, y_dev, X_test, y_test, label_names):
             f"weighted_f1={r['weighted_f1']:.4f}"
         )
     print(f"\n[{name}] test classification report:\n{out['test']['report']}")
+
+    if wandb_run is not None:
+        wandb_run.log({
+            f"{name}/dev/accuracy":     out["dev"]["accuracy"],
+            f"{name}/dev/macro_f1":     out["dev"]["macro_f1"],
+            f"{name}/dev/weighted_f1":  out["dev"]["weighted_f1"],
+            f"{name}/test/accuracy":    out["test"]["accuracy"],
+            f"{name}/test/macro_f1":    out["test"]["macro_f1"],
+            f"{name}/test/weighted_f1": out["test"]["weighted_f1"],
+        })
     return out
 
 
@@ -84,6 +101,35 @@ def main(args):
     print(f"meta_dir    = {meta_dir}")
     print(f"label_col   = {args.label_column}")
 
+    # --- wandb setup (optional) ---
+    wandb_run = None
+    use_wandb = (not args.no_wandb) and _WANDB_AVAILABLE
+    if args.no_wandb:
+        print("wandb disabled by --no_wandb")
+    elif not _WANDB_AVAILABLE:
+        print("wandb not installed; skipping wandb logging (pip install wandb to enable)")
+    if use_wandb:
+        run_name = args.wandb_run_name or f"svm_{args.dataset}_{args.label_column}"
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            config={
+                "dataset":         args.dataset,
+                "experiment_type": args.experiment_type,
+                "label_column":    args.label_column,
+                "model":           "LinearSVC",
+                "C":               args.C,
+                "max_iter":        args.max_iter,
+                "seed":            args.seed,
+                "tfidf_analyzer":  "char_wb",
+                "tfidf_ngram":     "3-5",
+                "tfidf_min_df":    2,
+            },
+            tags=["svm", "baseline", args.dataset, args.label_column],
+            reinit=True,
+        )
+
     train_df, X_meta_tr, y_tr_raw, feat_cols = load_split(dataset_dir, meta_dir, "train", args.label_column)
     dev_df,   X_meta_dv, y_dv_raw, _         = load_split(dataset_dir, meta_dir, "dev",   args.label_column)
     test_df,  X_meta_te, y_te_raw, _         = load_split(dataset_dir, meta_dir, "test",  args.label_column)
@@ -96,6 +142,16 @@ def main(args):
     y_te = le.transform(y_te_raw)
     label_names = [str(c) for c in le.classes_]
     print(f"classes ({len(label_names)}): {label_names}")
+
+    if wandb_run is not None:
+        wandb_run.config.update({
+            "num_classes":     len(label_names),
+            "classes":         label_names,
+            "n_train":         int(len(train_df)),
+            "n_dev":           int(len(dev_df)),
+            "n_test":          int(len(test_df)),
+            "n_meta_features": len(feat_cols),
+        })
 
     # --- Feature builders ---
     # Metadata: standardize using train stats.
@@ -134,8 +190,14 @@ def main(args):
         t0 = time.time()
         clf = LinearSVC(C=args.C, max_iter=args.max_iter, dual="auto", random_state=args.seed)
         clf.fit(Xtr, y_tr)
-        print(f"fit took {time.time() - t0:.1f}s")
-        all_results[name] = evaluate(name, clf, Xdv, y_dv, Xte, y_te, label_names)
+        fit_seconds = time.time() - t0
+        print(f"fit took {fit_seconds:.1f}s")
+        if wandb_run is not None:
+            wandb_run.log({
+                f"{name}/fit_seconds":     fit_seconds,
+                f"{name}/n_features":      Xtr.shape[1],
+            })
+        all_results[name] = evaluate(name, clf, Xdv, y_dv, Xte, y_te, label_names, wandb_run=wandb_run)
 
     # Summary table.
     summary_rows = []
@@ -163,6 +225,18 @@ def main(args):
     print(f"\nwrote: {out_dir / 'summary.csv'}")
     print(f"wrote: {out_dir / 'results.json'}")
 
+    if wandb_run is not None:
+        wandb_run.log({"summary": wandb.Table(dataframe=summary)})
+        artifact = wandb.Artifact(
+            name=f"svm-results-{args.dataset}-{args.label_column}",
+            type="results",
+            metadata={"dataset": args.dataset, "label_column": args.label_column},
+        )
+        artifact.add_file(str(out_dir / "summary.csv"))
+        artifact.add_file(str(out_dir / "results.json"))
+        wandb_run.log_artifact(artifact)
+        wandb_run.finish()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SVM baseline: metadata vs string vs both.")
@@ -175,5 +249,13 @@ if __name__ == "__main__":
     parser.add_argument("--C", type=float, default=1.0, help="LinearSVC C")
     parser.add_argument("--max_iter", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=3407)
+    # wandb
+    parser.add_argument("--wandb_project", type=str, default="DomURLs_BERT_metadata",
+                        help="wandb project name")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="wandb entity (team/user); defaults to your wandb login")
+    parser.add_argument("--wandb_run_name", type=str, default=None,
+                        help="wandb run name; default svm_<dataset>_<label_column>")
+    parser.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
     args = parser.parse_args()
     main(args)
