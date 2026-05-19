@@ -87,6 +87,9 @@ def main(args):
         'meta_dim': meta_dim,
         'meta_hidden_dim': args.meta_hidden_dim,
         'meta_out_dim': args.meta_out_dim,
+        'fusion_mode': args.fusion_mode,
+        'head_hidden_dim': args.head_hidden_dim,
+        'meta_layernorm': args.meta_layernorm,
     }
 
     experiment_params = {
@@ -108,6 +111,10 @@ def main(args):
     "meta_categories": meta_categories,
     "meta_hidden_dim": args.meta_hidden_dim,
     "meta_out_dim": args.meta_out_dim,
+    "fusion_mode": args.fusion_mode,
+    "head_hidden_dim": args.head_hidden_dim,
+    "meta_layernorm": args.meta_layernorm,
+    "class_weighted_loss": args.class_weighted_loss,
     }
 
     config = Namespace(**experiment_params)
@@ -185,7 +192,18 @@ def main(args):
     else:
         classifier = PLMEncoder(**model_params)
 
-    criterion = torch.nn.CrossEntropyLoss()
+    # Class-weighted CE (helps when the label distribution is skewed, esp. multiclass).
+    if args.class_weighted_loss:
+        import numpy as _np
+        y_train = df_train[args.label_column].to_numpy()
+        counts = _np.bincount(y_train, minlength=num_classes).astype('float64')
+        # Inverse-frequency weights, normalized so weights average to 1.
+        weights = counts.sum() / (num_classes * _np.maximum(counts, 1.0))
+        weights_t = torch.tensor(weights, dtype=torch.float32)
+        print(f"class-weighted CE: counts={counts.tolist()[:10]}... weights[min,max]=({weights.min():.3f},{weights.max():.3f})")
+        criterion = torch.nn.CrossEntropyLoss(weight=weights_t)
+    else:
+        criterion = torch.nn.CrossEntropyLoss()
 
     lit_model = BaseModel(classifier=classifier, num_classes=num_classes, criterion=criterion, config=config, names = label_encoder.classes_)
 
@@ -245,6 +263,17 @@ if __name__ == '__main__':
                         help='Hidden dim of the metadata MLP')
     parser.add_argument('--meta_out_dim', type=int, default=64,
                         help='Output dim of the metadata MLP (concatenated to [CLS])')
+    parser.add_argument('--fusion_mode', type=str, default='concat', choices=['concat', 'gated'],
+                        help='How to fuse meta with [CLS]. "gated" applies a learned per-sample '
+                             'sigmoid gate to MetaMLP(meta) before concatenation.')
+    parser.add_argument('--head_hidden_dim', type=int, default=0,
+                        help='If > 0, replace the final Linear classifier with a 2-layer MLP head '
+                             'of this hidden width (Linear -> GELU -> Dropout -> Linear).')
+    parser.add_argument('--meta_layernorm', action='store_true',
+                        help='Apply LayerNorm to MetaMLP output before fusion.')
+    parser.add_argument('--class_weighted_loss', action='store_true',
+                        help='Use inverse-frequency class weights in CrossEntropyLoss. '
+                             'Strongly recommended for imbalanced multiclass.')
     # wandb (logged alongside mlflow)
     parser.add_argument('--wandb_project', type=str, default='DomURLs_BERT_metadata',
                         help='wandb project name')
