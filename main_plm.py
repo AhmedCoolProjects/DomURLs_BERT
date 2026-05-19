@@ -1,5 +1,7 @@
 import mlflow
+import numpy as np
 import torch
+import torch.nn.functional as F
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch import seed_everything
@@ -26,6 +28,52 @@ from datetime import datetime
 from argparse import Namespace
 from utils import trace_jit_model
 from pathlib import Path
+
+
+def _compute_class_weights(y_train, num_classes, strategy, cap):
+    """Per-class CE weights. Returns None if strategy=='none'.
+
+    Strategies:
+      - inverse:      w[c] = N / (K * count[c])   (raw inverse-frequency)
+      - sqrt_inverse: w[c] = sqrt(N / count[c]), then normalized to mean 1
+      - capped:       inverse-frequency, then clip max weight to cap × min
+    """
+    if strategy == "none":
+        return None
+    counts = np.bincount(y_train, minlength=num_classes).astype(np.float64)
+    counts = np.maximum(counts, 1.0)            # avoid div-by-zero for absent classes
+    N = counts.sum()
+    K = num_classes
+
+    if strategy == "inverse":
+        w = N / (K * counts)
+    elif strategy == "sqrt_inverse":
+        w = np.sqrt(N / counts)
+        w = w / w.mean()                        # normalize so weights average ~1
+    elif strategy == "capped":
+        w = N / (K * counts)
+        w_min = w.min()
+        w = np.minimum(w, cap * w_min)
+        w = w / w.mean()                        # re-normalize
+    else:
+        raise ValueError(f"unknown class_weight_strategy: {strategy}")
+    return w.astype(np.float32)
+
+
+class FocalLoss(torch.nn.Module):
+    """Multiclass focal loss. weight=class weights (alpha); gamma down-weights easy ex."""
+    def __init__(self, gamma=2.0, weight=None):
+        super().__init__()
+        self.gamma = float(gamma)
+        if weight is not None:
+            self.register_buffer("weight", weight)
+        else:
+            self.weight = None
+
+    def forward(self, logits, targets):
+        ce = F.cross_entropy(logits, targets, weight=self.weight, reduction="none")
+        p_t = torch.exp(-ce)
+        return (((1.0 - p_t) ** self.gamma) * ce).mean()
 
 
 def main(args):
@@ -114,7 +162,10 @@ def main(args):
     "fusion_mode": args.fusion_mode,
     "head_hidden_dim": args.head_hidden_dim,
     "meta_layernorm": args.meta_layernorm,
-    "class_weighted_loss": args.class_weighted_loss,
+    "class_weight_strategy": args.class_weight_strategy,
+    "class_weight_cap": args.class_weight_cap,
+    "focal_loss": args.focal_loss,
+    "focal_gamma": args.focal_gamma,
     }
 
     config = Namespace(**experiment_params)
@@ -192,18 +243,24 @@ def main(args):
     else:
         classifier = PLMEncoder(**model_params)
 
-    # Class-weighted CE (helps when the label distribution is skewed, esp. multiclass).
-    if args.class_weighted_loss:
-        import numpy as _np
-        y_train = df_train[args.label_column].to_numpy()
-        counts = _np.bincount(y_train, minlength=num_classes).astype('float64')
-        # Inverse-frequency weights, normalized so weights average to 1.
-        weights = counts.sum() / (num_classes * _np.maximum(counts, 1.0))
-        weights_t = torch.tensor(weights, dtype=torch.float32)
-        print(f"class-weighted CE: counts={counts.tolist()[:10]}... weights[min,max]=({weights.min():.3f},{weights.max():.3f})")
-        criterion = torch.nn.CrossEntropyLoss(weight=weights_t)
+    # Build the loss: optional class weights + optional focal modulation.
+    weights_np = _compute_class_weights(
+        df_train[args.label_column].to_numpy(),
+        num_classes,
+        args.class_weight_strategy,
+        args.class_weight_cap,
+    )
+    weights_t = torch.tensor(weights_np, dtype=torch.float32) if weights_np is not None else None
+    if weights_t is not None:
+        print(f"class weights ({args.class_weight_strategy}): "
+              f"min={weights_t.min().item():.3f}  max={weights_t.max().item():.3f}  "
+              f"mean={weights_t.mean().item():.3f}")
+
+    if args.focal_loss:
+        criterion = FocalLoss(gamma=args.focal_gamma, weight=weights_t)
+        print(f"FocalLoss(gamma={args.focal_gamma}, weighted={weights_t is not None})")
     else:
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.CrossEntropyLoss(weight=weights_t)
 
     lit_model = BaseModel(classifier=classifier, num_classes=num_classes, criterion=criterion, config=config, names = label_encoder.classes_)
 
@@ -271,9 +328,17 @@ if __name__ == '__main__':
                              'of this hidden width (Linear -> GELU -> Dropout -> Linear).')
     parser.add_argument('--meta_layernorm', action='store_true',
                         help='Apply LayerNorm to MetaMLP output before fusion.')
-    parser.add_argument('--class_weighted_loss', action='store_true',
-                        help='Use inverse-frequency class weights in CrossEntropyLoss. '
-                             'Strongly recommended for imbalanced multiclass.')
+    parser.add_argument('--class_weight_strategy', type=str, default='none',
+                        choices=['none', 'inverse', 'sqrt_inverse', 'capped'],
+                        help='Per-class weighting in the loss. "inverse" is raw 1/freq '
+                             '(can destabilize); "sqrt_inverse" is gentler; "capped" caps '
+                             'the max/min ratio at --class_weight_cap.')
+    parser.add_argument('--class_weight_cap', type=float, default=10.0,
+                        help='Max weight / min weight ratio when --class_weight_strategy=capped.')
+    parser.add_argument('--focal_loss', action='store_true',
+                        help='Use focal loss instead of CE. Combines with --class_weight_strategy.')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Focal loss gamma. 0 reduces to weighted CE.')
     # wandb (logged alongside mlflow)
     parser.add_argument('--wandb_project', type=str, default='DomURLs_BERT_metadata',
                         help='wandb project name')
