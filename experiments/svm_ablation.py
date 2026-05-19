@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix, hstack
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -162,6 +164,18 @@ def main(args):
     n_classes = len(label_names)
     print(f"classes ({n_classes}): {label_names}\n")
 
+    # Optional: char n-gram TF-IDF of the domain string, hstacked onto every ablation.
+    S_tr = S_dv = S_te = None
+    if args.include_string:
+        vec = TfidfVectorizer(
+            analyzer="char_wb", ngram_range=(3, 5), min_df=2,
+            sublinear_tf=True, lowercase=True,
+        )
+        S_tr = vec.fit_transform(train_df["input"].astype(str).values)
+        S_dv = vec.transform(dev_df["input"].astype(str).values)
+        S_te = vec.transform(test_df["input"].astype(str).values)
+        print(f"string tfidf vocab size: {S_tr.shape[1]}  (will be concatenated to every ablation)\n")
+
     # Column-name -> index lookup for fast slicing.
     col_index = {col: i for i, col in enumerate(feat_cols)}
 
@@ -211,8 +225,14 @@ def main(args):
         Xdv_s = scaler.transform(Xdv)
         Xte_s = scaler.transform(Xte)
 
+        if args.include_string:
+            Xtr_s = hstack([csr_matrix(Xtr_s), S_tr]).tocsr()
+            Xdv_s = hstack([csr_matrix(Xdv_s), S_dv]).tocsr()
+            Xte_s = hstack([csr_matrix(Xte_s), S_te]).tocsr()
+
         cats_sorted = sorted(cats)
-        print(f"--- [{name}] cats={cats_sorted} | n_features={Xtr_s.shape[1]} ---")
+        run_name = f"{name}__str" if args.include_string else name
+        print(f"--- [{run_name}] cats={cats_sorted} | n_features={Xtr_s.shape[1]} ---")
         try:
             t0 = time.time()
             clf = LinearSVC(C=args.C, max_iter=args.max_iter, dual="auto", random_state=args.seed)
@@ -231,7 +251,7 @@ def main(args):
         )
 
         summary_rows.append({
-            "ablation":             name,
+            "ablation":             run_name,
             "categories":           ",".join(cats_sorted),
             "n_features":           int(Xtr_s.shape[1]),
             "fit_seconds":          round(fit_seconds, 2),
@@ -251,8 +271,9 @@ def main(args):
         if use_wandb:
             run_config = dict(base_config)
             run_config.update({
-                "ablation":      name,
+                "ablation":      run_name,
                 "categories":    cats_sorted,
+                "include_string": bool(args.include_string),
                 "n_features":    int(Xtr_s.shape[1]),
                 "fit_seconds":   fit_seconds,
             })
@@ -260,10 +281,10 @@ def main(args):
                 project=args.wandb_project,
                 entity=args.wandb_entity,
                 group=group_name,
-                job_type=name,
-                name=f"{name}__{timestamp}",
+                job_type=run_name,
+                name=f"{run_name}__{timestamp}",
                 config=run_config,
-                tags=["svm", "ablation", args.dataset, args.label_column, name],
+                tags=["svm", "ablation", args.dataset, args.label_column, run_name],
             )
             for split_name, m in (("dev", dev_m), ("test", test_m)):
                 for k in ("accuracy", "precision_macro", "recall_macro", "f1_macro",
@@ -328,6 +349,9 @@ if __name__ == "__main__":
     parser.add_argument("--ablations", type=str, default=None,
                         help="Comma-separated subset of ablation names "
                              "(default: run all 13). E.g. 'full_meta,only_rdap,drop_rdap'")
+    parser.add_argument("--include_string", action="store_true",
+                        help="Concatenate char_wb char n-gram TF-IDF of the domain "
+                             "string to every ablation's metadata features.")
     parser.add_argument("--wandb_project", type=str, default="DomURLs_BERT_metadata")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_group", type=str, default=None)
