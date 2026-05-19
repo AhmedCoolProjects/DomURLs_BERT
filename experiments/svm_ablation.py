@@ -39,6 +39,16 @@ CATEGORIES = ["rdap", "dns", "tls", "ip", "ct", "x"]
 # Always-on baseline flags (not tied to a category).
 ALWAYS_ON = ["input_valid", "input_is_ip_address"]
 
+# Hand-picked combos for the second-round ablation (see PLAN_ABLATION_METADATA.md).
+# Maps run_name -> set of category prefixes to KEEP.
+COMBO_SPECS = {
+    "drop_x_ct":         {"rdap", "dns", "tls", "ip"},        # drop the two zero-marginal cats
+    "drop_x_ct_tls":     {"rdap", "dns", "ip"},               # drop the three weakest cats
+    "keep_dns_ip":       {"dns", "ip"},                       # core duo
+    "keep_dns_ip_rdap":  {"dns", "ip", "rdap"},               # core + rdap
+    "keep_dns_ip_tls":   {"dns", "ip", "tls"},                # core + tls
+}
+
 
 def categorize(feature_cols):
     """Return {category: [columns]} plus a 'general' bucket for always-on flags."""
@@ -62,6 +72,8 @@ def build_ablation_specs():
         specs.append((f"only_{cat}", {cat}))
     for cat in CATEGORIES:
         specs.append((f"drop_{cat}", set(CATEGORIES) - {cat}))
+    for name, cats in COMBO_SPECS.items():
+        specs.append((name, set(cats)))
     return specs
 
 
