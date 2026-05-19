@@ -37,7 +37,8 @@ class BERTDataset(Dataset):
         __len__(): Returns the length of the dataset.
         __getitem__(index): Retrieves a sample from the dataset at the given index.
     """
-    def __init__(self, texts, labels, max_length=80, pretrained_path='amahdaouy/DomURLs_BERT'):
+    def __init__(self, texts, labels, max_length=80, pretrained_path='amahdaouy/DomURLs_BERT',
+                 meta_vectors=None):
         self.texts = texts
         self.labels = labels
         self.max_length = max_length
@@ -48,6 +49,12 @@ class BERTDataset(Dataset):
             self.tokenizer =  BertTokenizer(f"{directory_path}/urlbert_vocab/vocab.txt")
         else:
             self.tokenizer =  AutoTokenizer.from_pretrained(pretrained_path)
+        # Optional per-row metadata vectors (already scaled). Shape (n, d).
+        self.meta_vectors = meta_vectors
+        if self.meta_vectors is not None and len(self.meta_vectors) != self.length:
+            raise ValueError(
+                f"meta_vectors length {len(self.meta_vectors)} != labels length {self.length}"
+            )
 
     def __len__(self):
         return self.length
@@ -55,10 +62,10 @@ class BERTDataset(Dataset):
     def __getitem__(self, index):
         label = self.labels[index]
         text = self.texts[index]
-        
+
         if self.preprocess_input:
             text = split_url(text)
-            
+
         encoded_input = self.tokenizer(
                 text,
                 max_length = self.max_length,
@@ -74,5 +81,7 @@ class BERTDataset(Dataset):
             "input_ids":input_ids.flatten(),
             "attention_mask": attention_mask.flatten()
         }
-        
+        if self.meta_vectors is not None:
+            data["meta"] = torch.as_tensor(self.meta_vectors[index], dtype=torch.float32)
+
         return data, label

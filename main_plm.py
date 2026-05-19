@@ -33,10 +33,35 @@ def main(args):
     else:
         max_length = 128
 
+    # Metadata fusion: only meaningful for domain experiments. Auto-disable for URL.
+    use_metadata = (not args.no_metadata) and (args.experiment_type == 'domain')
+    if (not args.no_metadata) and args.experiment_type != 'domain':
+        print("metadata fusion disabled (only supported for --experiment_type domain)")
+
+    meta_categories = None
+    if use_metadata:
+        if not args.metadata_dir:
+            raise ValueError("metadata fusion is enabled but --metadata_dir is empty. "
+                             "Pass --no_metadata to disable or provide --metadata_dir.")
+        meta_categories = [c.strip() for c in args.meta_categories.split(",") if c.strip()]
+
     # Load the data
-    data_dict = load_dataset(path, args.label_column)
+    data_dict = load_dataset(
+        path,
+        args.label_column,
+        meta_dir=args.metadata_dir if use_metadata else None,
+        meta_categories=meta_categories,
+    )
     df_train, df_dev, df_test, label_encoder = data_dict['train'], data_dict['dev'], data_dict['test'], data_dict['label_encoder']
     num_classes = len(label_encoder.classes_)
+
+    meta_train = data_dict.get("meta_train")
+    meta_dev   = data_dict.get("meta_dev")
+    meta_test  = data_dict.get("meta_test")
+    meta_dim   = meta_train.shape[1] if meta_train is not None else 0
+    if use_metadata:
+        print(f"metadata: {meta_dim} features, categories={meta_categories}")
+        print(f"meta shapes: train={meta_train.shape} dev={meta_dev.shape} test={meta_test.shape}")
     
     training_params = {"batch_size": args.batch_size,
                         "shuffle": True,
@@ -52,7 +77,10 @@ def main(args):
     model_params = {
         'output_size': num_classes,
         'drop_prob': args.dropout_prob,
-        'pretrained_path': args.pretrained_path
+        'pretrained_path': args.pretrained_path,
+        'meta_dim': meta_dim,
+        'meta_hidden_dim': args.meta_hidden_dim,
+        'meta_out_dim': args.meta_out_dim,
     }
 
     experiment_params = {
@@ -61,21 +89,26 @@ def main(args):
     "epochs": args.epochs,
     "gradient_clip_val": 0.9,
     "dataset" : args.dataset,
-    'pretrained_path': args.pretrained_path, 
+    'pretrained_path': args.pretrained_path,
     "max_length": max_length,
     "num_workers" : args.num_workers,
     "drop_prob": args.dropout_prob,
     "batch_size": args.batch_size,
     "experiment_type": args.experiment_type,
     "label_column" : args.label_column,
-    "num_classes": num_classes
+    "num_classes": num_classes,
+    "use_metadata": use_metadata,
+    "meta_dim": meta_dim,
+    "meta_categories": meta_categories,
+    "meta_hidden_dim": args.meta_hidden_dim,
+    "meta_out_dim": args.meta_out_dim,
     }
 
     config = Namespace(**experiment_params)
 
-    train_dataset = BERTDataset(texts=df_train['input'].values, labels=df_train[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path)
-    dev_dataset = BERTDataset(texts=df_dev['input'].values, labels=df_dev[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path)
-    test_dataset = BERTDataset(texts=df_test['input'].values, labels=df_test[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path)
+    train_dataset = BERTDataset(texts=df_train['input'].values, labels=df_train[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path, meta_vectors=meta_train)
+    dev_dataset = BERTDataset(texts=df_dev['input'].values, labels=df_dev[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path, meta_vectors=meta_dev)
+    test_dataset = BERTDataset(texts=df_test['input'].values, labels=df_test[args.label_column].values, max_length=max_length, pretrained_path=args.pretrained_path, meta_vectors=meta_test)
     
     train_loader = DataLoader(train_dataset, **training_params)
     dev_loader = DataLoader(dev_dataset, **test_params)
@@ -138,8 +171,11 @@ def main(args):
     test_results = trainer.test(ckpt_path='best', dataloaders=test_loader)
 
     # Logging experiment metadata artifact
-    path_metadata = f"{checkpoint_path}/model_metadata.p" 
+    path_metadata = f"{checkpoint_path}/model_metadata.p"
     experiment_params['label_encoder'] = label_encoder
+    if use_metadata:
+        experiment_params['meta_scaler']        = data_dict.get('meta_scaler')
+        experiment_params['meta_feature_cols']  = data_dict.get('meta_feature_cols')
     with open(path_metadata, 'wb') as f:
         pickle.dump(experiment_params, f)
     mlflow.log_artifact(path_metadata, artifact_path=f"model_metadata.p")
@@ -167,6 +203,19 @@ if __name__ == '__main__':
     parser.add_argument('--label_column', type=str, default='label', help='Name of the label column')
     parser.add_argument('--seed', type=int, default=3407, help='Random seed')
     parser.add_argument('--device', type=int, default=0, help='GPU device id')
+    # Metadata fusion (only for --experiment_type domain). Default ON; opt-out with --no_metadata.
+    parser.add_argument('--no_metadata', action='store_true',
+                        help='Disable metadata fusion (default: enabled).')
+    parser.add_argument('--metadata_dir', type=str,
+                        default='/home/ahmed.bargady/lustre/nlp_team-um6p-st-sccs-id7fz1zvotk/IDS/ahmed.bargady/data/domains/DomainsMetadata',
+                        help='Directory containing {train,dev,test}_meta.csv')
+    parser.add_argument('--meta_categories', type=str, default='rdap,dns,tls,ip',
+                        help='Comma-separated metadata category prefixes to include '
+                             '(default: drop_x_ct, the round-2 ablation winner).')
+    parser.add_argument('--meta_hidden_dim', type=int, default=128,
+                        help='Hidden dim of the metadata MLP')
+    parser.add_argument('--meta_out_dim', type=int, default=64,
+                        help='Output dim of the metadata MLP (concatenated to [CLS])')
     args = parser.parse_args()
 
     main(args=args)
