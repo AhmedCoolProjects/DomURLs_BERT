@@ -4,6 +4,12 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch import seed_everything
 from lightning.pytorch.loggers import MLFlowLogger
+try:
+    from lightning.pytorch.loggers import WandbLogger
+    _WANDB_AVAILABLE = True
+except ImportError:
+    WandbLogger = None
+    _WANDB_AVAILABLE = False
 from torch.utils.data import DataLoader
 from data_utils.bertdataset import BERTDataset
 from data_utils.load_data import load_dataset
@@ -142,6 +148,29 @@ def main(args):
     experiment_id = mlflow.active_run().info.experiment_id
     run_id = mlflow.active_run().info.run_id
 
+    # --- Optional wandb logger (alongside mlflow) ---
+    loggers = [mlf_logger]
+    use_wandb = (not args.no_wandb) and _WANDB_AVAILABLE
+    if args.no_wandb:
+        print("wandb disabled by --no_wandb")
+    elif not _WANDB_AVAILABLE:
+        print("wandb not installed; skipping wandb logging")
+    if use_wandb:
+        model_short = args.pretrained_path.split('/')[-1]
+        meta_tag = "no_meta" if not use_metadata else f"meta_{','.join(meta_categories) if meta_categories else 'all'}"
+        wandb_run_name = args.wandb_run_name or f"{model_short}__{meta_tag}__{args.dataset}__{args.label_column}"
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group,
+            name=wandb_run_name,
+            tags=["plm", args.dataset, args.label_column,
+                  args.pretrained_path, "metadata" if use_metadata else "no_metadata"],
+            log_model=False,
+            config=experiment_params,
+        )
+        loggers.append(wandb_logger)
+
     ckpts_path = './mlruns/ckpts'
     checkpoint_path = f"{ckpts_path}/{run_id}/"
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_path, monitor='val_loss',  
@@ -161,7 +190,7 @@ def main(args):
     lit_model = BaseModel(classifier=classifier, num_classes=num_classes, criterion=criterion, config=config, names = label_encoder.classes_)
 
     # Instanciate model trainer
-    trainer = Trainer(max_epochs=args.epochs, devices=[args.device], accelerator="gpu", logger=mlf_logger, callbacks=[checkpoint_callback, early_stopping],  benchmark=False,
+    trainer = Trainer(max_epochs=args.epochs, devices=[args.device], accelerator="gpu", logger=loggers, callbacks=[checkpoint_callback, early_stopping],  benchmark=False,
                   deterministic=True, precision="16", gradient_clip_val=1)
     # Model training
     trainer.fit(lit_model, train_dataloaders=train_loader, val_dataloaders=dev_loader)
@@ -216,6 +245,16 @@ if __name__ == '__main__':
                         help='Hidden dim of the metadata MLP')
     parser.add_argument('--meta_out_dim', type=int, default=64,
                         help='Output dim of the metadata MLP (concatenated to [CLS])')
+    # wandb (logged alongside mlflow)
+    parser.add_argument('--wandb_project', type=str, default='DomURLs_BERT_metadata',
+                        help='wandb project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='wandb entity (team/user); defaults to your wandb login')
+    parser.add_argument('--wandb_group', type=str, default=None,
+                        help='wandb group name; useful to bucket related runs')
+    parser.add_argument('--wandb_run_name', type=str, default=None,
+                        help='wandb run name; default derived from model+meta+dataset')
+    parser.add_argument('--no_wandb', action='store_true', help='disable wandb logging')
     args = parser.parse_args()
 
     main(args=args)
