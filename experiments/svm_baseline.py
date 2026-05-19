@@ -9,13 +9,20 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    f1_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import LinearSVC
 
@@ -58,36 +65,57 @@ def load_split(dataset_dir: Path, meta_dir: Path, split: str, label_column: str)
     return merged, X_meta, merged[label_column].values, feature_cols
 
 
-def evaluate(name: str, clf, X_dev, y_dev, X_test, y_test, label_names, wandb_run=None):
+def _compute_auc(y_true, y_scores, n_classes):
+    """ROC-AUC. Binary uses 1-D decision scores; multiclass uses macro OvR."""
+    try:
+        if n_classes == 2:
+            scores = y_scores if y_scores.ndim == 1 else y_scores[:, 1]
+            return float(roc_auc_score(y_true, scores))
+        return float(roc_auc_score(y_true, y_scores, multi_class="ovr", average="macro"))
+    except Exception as e:
+        print(f"  [auc] failed: {e}")
+        return float("nan")
+
+
+def compute_metrics(clf, X, y, n_classes):
+    y_pred = clf.predict(X)
+    y_scores = clf.decision_function(X)
+    p_mac, r_mac, f1_mac, _ = precision_recall_fscore_support(
+        y, y_pred, average="macro", zero_division=0
+    )
+    p_wt, r_wt, f1_wt, _ = precision_recall_fscore_support(
+        y, y_pred, average="weighted", zero_division=0
+    )
+    return {
+        "accuracy":        float(accuracy_score(y, y_pred)),
+        "precision_macro": float(p_mac),
+        "recall_macro":    float(r_mac),
+        "f1_macro":        float(f1_mac),
+        "precision_weighted": float(p_wt),
+        "recall_weighted":    float(r_wt),
+        "f1_weighted":        float(f1_wt),
+        "auc":             _compute_auc(y, y_scores, n_classes),
+        "y_pred":          y_pred,
+        "y_scores":        y_scores,
+    }
+
+
+def evaluate(name, clf, X_dev, y_dev, X_test, y_test, label_names, n_classes):
     out = {}
     for split_name, X, y in (("dev", X_dev, y_dev), ("test", X_test, y_test)):
-        y_pred = clf.predict(X)
-        out[split_name] = {
-            "accuracy": float(accuracy_score(y, y_pred)),
-            "macro_f1": float(f1_score(y, y_pred, average="macro")),
-            "weighted_f1": float(f1_score(y, y_pred, average="weighted")),
-            "report": classification_report(
-                y, y_pred, target_names=label_names, digits=4, zero_division=0
-            ),
-        }
+        m = compute_metrics(clf, X, y, n_classes)
+        out[split_name] = m
+        out[split_name]["report"] = classification_report(
+            y, m["y_pred"], target_names=label_names, digits=4, zero_division=0
+        )
     print(f"\n=== {name} ===")
     for split_name in ("dev", "test"):
         r = out[split_name]
         print(
-            f"[{split_name}] acc={r['accuracy']:.4f}  macro_f1={r['macro_f1']:.4f}  "
-            f"weighted_f1={r['weighted_f1']:.4f}"
+            f"[{split_name}] acc={r['accuracy']:.4f}  prec={r['precision_macro']:.4f}  "
+            f"rec={r['recall_macro']:.4f}  f1={r['f1_macro']:.4f}  auc={r['auc']:.4f}"
         )
     print(f"\n[{name}] test classification report:\n{out['test']['report']}")
-
-    if wandb_run is not None:
-        wandb_run.log({
-            f"{name}/dev/accuracy":     out["dev"]["accuracy"],
-            f"{name}/dev/macro_f1":     out["dev"]["macro_f1"],
-            f"{name}/dev/weighted_f1":  out["dev"]["weighted_f1"],
-            f"{name}/test/accuracy":    out["test"]["accuracy"],
-            f"{name}/test/macro_f1":    out["test"]["macro_f1"],
-            f"{name}/test/weighted_f1": out["test"]["weighted_f1"],
-        })
     return out
 
 
@@ -101,34 +129,15 @@ def main(args):
     print(f"meta_dir    = {meta_dir}")
     print(f"label_col   = {args.label_column}")
 
-    # --- wandb setup (optional) ---
-    wandb_run = None
     use_wandb = (not args.no_wandb) and _WANDB_AVAILABLE
     if args.no_wandb:
         print("wandb disabled by --no_wandb")
     elif not _WANDB_AVAILABLE:
         print("wandb not installed; skipping wandb logging (pip install wandb to enable)")
-    if use_wandb:
-        run_name = args.wandb_run_name or f"svm_{args.dataset}_{args.label_column}"
-        wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=run_name,
-            config={
-                "dataset":         args.dataset,
-                "experiment_type": args.experiment_type,
-                "label_column":    args.label_column,
-                "model":           "LinearSVC",
-                "C":               args.C,
-                "max_iter":        args.max_iter,
-                "seed":            args.seed,
-                "tfidf_analyzer":  "char_wb",
-                "tfidf_ngram":     "3-5",
-                "tfidf_min_df":    2,
-            },
-            tags=["svm", "baseline", args.dataset, args.label_column],
-            reinit=True,
-        )
+
+    # All feature-set runs share a group so they line up as rows of one experiment.
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    group_name = args.wandb_group or f"svm_{args.dataset}_{args.label_column}_{timestamp}"
 
     train_df, X_meta_tr, y_tr_raw, feat_cols = load_split(dataset_dir, meta_dir, "train", args.label_column)
     dev_df,   X_meta_dv, y_dv_raw, _         = load_split(dataset_dir, meta_dir, "dev",   args.label_column)
@@ -141,17 +150,8 @@ def main(args):
     y_dv = le.transform(y_dv_raw)
     y_te = le.transform(y_te_raw)
     label_names = [str(c) for c in le.classes_]
-    print(f"classes ({len(label_names)}): {label_names}")
-
-    if wandb_run is not None:
-        wandb_run.config.update({
-            "num_classes":     len(label_names),
-            "classes":         label_names,
-            "n_train":         int(len(train_df)),
-            "n_dev":           int(len(dev_df)),
-            "n_test":          int(len(test_df)),
-            "n_meta_features": len(feat_cols),
-        })
+    n_classes = len(label_names)
+    print(f"classes ({n_classes}): {label_names}")
 
     # --- Feature builders ---
     # Metadata: standardize using train stats.
@@ -184,6 +184,26 @@ def main(args):
         "meta_plus_string": (MS_tr, MS_dv, MS_te),
     }
 
+    # Config shared by every per-feature-set run.
+    base_config = {
+        "dataset":         args.dataset,
+        "experiment_type": args.experiment_type,
+        "label_column":    args.label_column,
+        "model":           "LinearSVC",
+        "C":               args.C,
+        "max_iter":        args.max_iter,
+        "seed":            args.seed,
+        "tfidf_analyzer":  "char_wb",
+        "tfidf_ngram":     "3-5",
+        "tfidf_min_df":    2,
+        "num_classes":     n_classes,
+        "classes":         label_names,
+        "n_train":         int(len(train_df)),
+        "n_dev":           int(len(dev_df)),
+        "n_test":          int(len(test_df)),
+        "n_meta_features": len(feat_cols),
+    }
+
     all_results = {}
     for name, (Xtr, Xdv, Xte) in feature_sets.items():
         print(f"\n--- training LinearSVC on '{name}' (X_train shape={Xtr.shape}) ---")
@@ -192,50 +212,106 @@ def main(args):
         clf.fit(Xtr, y_tr)
         fit_seconds = time.time() - t0
         print(f"fit took {fit_seconds:.1f}s")
-        if wandb_run is not None:
-            wandb_run.log({
-                f"{name}/fit_seconds":     fit_seconds,
-                f"{name}/n_features":      Xtr.shape[1],
-            })
-        all_results[name] = evaluate(name, clf, Xdv, y_dv, Xte, y_te, label_names, wandb_run=wandb_run)
 
-    # Summary table.
+        results = evaluate(name, clf, Xdv, y_dv, Xte, y_te, label_names, n_classes)
+        all_results[name] = results
+
+        # One wandb run per feature set, all grouped together → clean row-per-row
+        # comparison in the runs table with columns accuracy/precision/recall/f1/auc.
+        if use_wandb:
+            run_config = dict(base_config)
+            run_config["feature_set"] = name
+            run_config["n_features"] = int(Xtr.shape[1])
+            run_config["fit_seconds"] = fit_seconds
+
+            run = wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                group=group_name,
+                job_type=name,
+                name=f"{name}__{timestamp}",
+                config=run_config,
+                tags=["svm", "baseline", args.dataset, args.label_column, name],
+            )
+            # Use summary.* for run-table columns (one value per run, no time axis).
+            for split_name in ("dev", "test"):
+                m = results[split_name]
+                for k in ("accuracy", "precision_macro", "recall_macro", "f1_macro",
+                          "precision_weighted", "recall_weighted", "f1_weighted", "auc"):
+                    run.summary[f"{split_name}/{k}"] = m[k]
+            run.summary["fit_seconds"] = fit_seconds
+            run.summary["n_features"] = int(Xtr.shape[1])
+
+            # Per-class F1 from the classification report on test.
+            per_class = precision_recall_fscore_support(
+                y_te, results["test"]["y_pred"], labels=list(range(n_classes)), zero_division=0
+            )
+            for cls_idx, cls_name in enumerate(label_names):
+                run.summary[f"test/per_class/{cls_name}/precision"] = float(per_class[0][cls_idx])
+                run.summary[f"test/per_class/{cls_name}/recall"]    = float(per_class[1][cls_idx])
+                run.summary[f"test/per_class/{cls_name}/f1"]        = float(per_class[2][cls_idx])
+                run.summary[f"test/per_class/{cls_name}/support"]   = int(per_class[3][cls_idx])
+
+            run.finish()
+
+    # --- summary table (across feature sets) ---
     summary_rows = []
     for name, r in all_results.items():
         summary_rows.append({
-            "feature_set":      name,
-            "dev_accuracy":     r["dev"]["accuracy"],
-            "dev_macro_f1":     r["dev"]["macro_f1"],
-            "test_accuracy":    r["test"]["accuracy"],
-            "test_macro_f1":    r["test"]["macro_f1"],
-            "test_weighted_f1": r["test"]["weighted_f1"],
+            "feature_set":         name,
+            "dev_accuracy":        r["dev"]["accuracy"],
+            "dev_precision_macro": r["dev"]["precision_macro"],
+            "dev_recall_macro":    r["dev"]["recall_macro"],
+            "dev_f1_macro":        r["dev"]["f1_macro"],
+            "dev_auc":             r["dev"]["auc"],
+            "test_accuracy":       r["test"]["accuracy"],
+            "test_precision_macro":r["test"]["precision_macro"],
+            "test_recall_macro":   r["test"]["recall_macro"],
+            "test_f1_macro":       r["test"]["f1_macro"],
+            "test_f1_weighted":    r["test"]["f1_weighted"],
+            "test_auc":            r["test"]["auc"],
         })
     summary = pd.DataFrame(summary_rows)
     print("\n=== SUMMARY ===")
     print(summary.to_string(index=False))
 
     summary.to_csv(out_dir / "summary.csv", index=False)
-    serializable = {
-        name: {split: {k: v for k, v in r.items() if k != "report"} | {"report": r["report"]}
-               for split, r in splits.items()}
-        for name, splits in all_results.items()
-    }
+    # Strip non-JSON-serializable arrays before dumping.
+    serializable = {}
+    for name, splits in all_results.items():
+        serializable[name] = {}
+        for split, r in splits.items():
+            serializable[name][split] = {
+                k: v for k, v in r.items() if k not in ("y_pred", "y_scores")
+            }
     with open(out_dir / "results.json", "w") as f:
         json.dump(serializable, f, indent=2)
     print(f"\nwrote: {out_dir / 'summary.csv'}")
     print(f"wrote: {out_dir / 'results.json'}")
 
-    if wandb_run is not None:
-        wandb_run.log({"summary": wandb.Table(dataframe=summary)})
+    # One extra wandb run that holds the comparison table + the artifact, so you have
+    # a single place to look at the full picture for this experiment.
+    if use_wandb:
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=group_name,
+            job_type="summary",
+            name=f"summary__{timestamp}",
+            config=base_config,
+            tags=["svm", "baseline", args.dataset, args.label_column, "summary"],
+        )
+        run.log({"comparison": wandb.Table(dataframe=summary)})
         artifact = wandb.Artifact(
             name=f"svm-results-{args.dataset}-{args.label_column}",
             type="results",
-            metadata={"dataset": args.dataset, "label_column": args.label_column},
+            metadata={"dataset": args.dataset, "label_column": args.label_column,
+                      "group": group_name},
         )
         artifact.add_file(str(out_dir / "summary.csv"))
         artifact.add_file(str(out_dir / "results.json"))
-        wandb_run.log_artifact(artifact)
-        wandb_run.finish()
+        run.log_artifact(artifact)
+        run.finish()
 
 
 if __name__ == "__main__":
@@ -247,15 +323,16 @@ if __name__ == "__main__":
     parser.add_argument("--label_column", type=str, default="label",
                         help="'label' for binary, 'class' for multiclass")
     parser.add_argument("--C", type=float, default=1.0, help="LinearSVC C")
-    parser.add_argument("--max_iter", type=int, default=5000)
+    parser.add_argument("--max_iter", type=int, default=10000,
+                        help="LinearSVC max_iter (5k under-converged on meta+string)")
     parser.add_argument("--seed", type=int, default=3407)
     # wandb
     parser.add_argument("--wandb_project", type=str, default="DomURLs_BERT_metadata",
                         help="wandb project name")
     parser.add_argument("--wandb_entity", type=str, default=None,
                         help="wandb entity (team/user); defaults to your wandb login")
-    parser.add_argument("--wandb_run_name", type=str, default=None,
-                        help="wandb run name; default svm_<dataset>_<label_column>")
+    parser.add_argument("--wandb_group", type=str, default=None,
+                        help="wandb group name; default svm_<dataset>_<label>_<timestamp>")
     parser.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
     args = parser.parse_args()
     main(args)
