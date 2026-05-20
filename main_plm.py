@@ -99,12 +99,17 @@ def main(args):
                              "Pass --no_metadata to disable or provide --metadata_dir.")
         meta_categories = [c.strip() for c in args.meta_categories.split(",") if c.strip()]
 
+    if args.malicious_only and args.label_column == "label":
+        raise ValueError("--malicious_only filters to label=='malicious', leaving only one "
+                         "class — combine it with --label_column class for stage-2 training.")
+
     # Load the data
     data_dict = load_dataset(
         path,
         args.label_column,
         meta_dir=args.metadata_dir if use_metadata else None,
         meta_categories=meta_categories,
+        malicious_only=args.malicious_only,
     )
     df_train, df_dev, df_test, label_encoder = data_dict['train'], data_dict['dev'], data_dict['test'], data_dict['label_encoder']
     num_classes = len(label_encoder.classes_)
@@ -166,6 +171,7 @@ def main(args):
     "class_weight_cap": args.class_weight_cap,
     "focal_loss": args.focal_loss,
     "focal_gamma": args.focal_gamma,
+    "malicious_only": args.malicious_only,
     }
 
     config = Namespace(**experiment_params)
@@ -339,6 +345,10 @@ if __name__ == '__main__':
                         help='Use focal loss instead of CE. Combines with --class_weight_strategy.')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal loss gamma. 0 reduces to weighted CE.')
+    parser.add_argument('--malicious_only', action='store_true',
+                        help='Stage-2 of two-stage classifier: drop legit rows before '
+                             'encoding labels, train only on malicious. Use with '
+                             '--label_column class.')
     # wandb (logged alongside mlflow)
     parser.add_argument('--wandb_project', type=str, default='DomURLs_BERT_metadata',
                         help='wandb project name')

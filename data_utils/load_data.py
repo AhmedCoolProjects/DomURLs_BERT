@@ -35,19 +35,34 @@ def _load_meta(meta_dir, split, categories):
     return df[["input"] + feature_cols], feature_cols
 
 
-def load_dataset(path, label_column, meta_dir=None, meta_categories=None):
+def load_dataset(path, label_column, meta_dir=None, meta_categories=None,
+                 malicious_only=False):
     """Load train/dev/test plus (optionally) the metadata vectors aligned by `input`.
 
     When `meta_dir` is given, returns extra keys:
         'meta_train', 'meta_dev', 'meta_test'  -> np.ndarray (n, d)
         'meta_scaler'                          -> fitted StandardScaler
         'meta_feature_cols'                    -> list[str], in column order
+
+    When `malicious_only=True`, drops all rows with label=='legit' before
+    encoding labels — used for stage-2 of the two-stage classifier.
     """
     le = LabelEncoder()
 
     df_train = pd.read_csv(os.path.join(path, "train.csv"))
     df_dev   = pd.read_csv(os.path.join(path, "dev.csv"))
     df_test  = pd.read_csv(os.path.join(path, "test.csv"))
+
+    if malicious_only:
+        if "label" not in df_train.columns:
+            raise ValueError("--malicious_only requires a 'label' column in the dataset")
+        before = (len(df_train), len(df_dev), len(df_test))
+        df_train = df_train[df_train["label"] == "malicious"].reset_index(drop=True)
+        df_dev   = df_dev[df_dev["label"] == "malicious"].reset_index(drop=True)
+        df_test  = df_test[df_test["label"] == "malicious"].reset_index(drop=True)
+        after = (len(df_train), len(df_dev), len(df_test))
+        print(f"malicious_only filter: train {before[0]}->{after[0]}, "
+              f"dev {before[1]}->{after[1]}, test {before[2]}->{after[2]}")
 
     df_train[label_column] = le.fit_transform(df_train[label_column])
     df_dev[label_column]   = le.transform(df_dev[label_column])
