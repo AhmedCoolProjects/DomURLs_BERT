@@ -68,6 +68,9 @@ def load_stage(ckpt_dir, batch_size=256, num_workers=4):
         criterion=torch.nn.CrossEntropyLoss(),
         config=type("Cfg", (), {"lr": meta["lr"], "weight_decay": meta["weight_decay"]})(),
         names=meta["label_encoder"].classes_,
+        # strict=False ignores criterion.weight buffer when training used class weights —
+        # we only need the classifier params for inference.
+        strict=False,
     )
     lit.eval()
     return lit, meta
