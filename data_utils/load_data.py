@@ -7,10 +7,31 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 _META_NON_FEATURE_COLS = {"input", "class", "label", "_error", "_elapsed_s"}
 
 
-def _select_meta_columns(all_feature_cols, categories):
-    """Return the metadata column subset matching the given category prefixes.
+def _select_meta_columns(all_feature_cols, categories=None, explicit_columns=None):
+    """Return the metadata column subset to use.
 
-    Always keeps the always-on flags (input_valid, input_is_ip_address)."""
+    If `explicit_columns` is given (e.g. from a keep_columns.txt produced by
+    feature_step1_dead.py), return the intersection with all_feature_cols in
+    the user-provided order — categories are ignored, and the always-on flags
+    are NOT auto-added (the user's list is authoritative).
+
+    Otherwise, fall back to category-prefix filtering with the always-on flags
+    auto-included.
+    """
+    if explicit_columns is not None:
+        available = set(all_feature_cols)
+        picked, missing = [], []
+        for c in explicit_columns:
+            if c in available:
+                picked.append(c)
+            else:
+                missing.append(c)
+        if missing:
+            preview = missing[:5]
+            more = f" (+{len(missing)-5} more)" if len(missing) > 5 else ""
+            print(f"[meta] WARNING: {len(missing)} requested columns not in meta CSV: {preview}{more}")
+        return picked
+
     always_on = [c for c in ("input_valid", "input_is_ip_address") if c in all_feature_cols]
     if categories is None:
         return always_on + [c for c in all_feature_cols if c not in always_on]
@@ -25,18 +46,18 @@ def _select_meta_columns(all_feature_cols, categories):
     return picked
 
 
-def _load_meta(meta_dir, split, categories):
-    """Read one meta split CSV. Returns (df_meta_id, X_meta, feature_cols)."""
+def _load_meta(meta_dir, split, categories, explicit_columns=None):
+    """Read one meta split CSV. Returns (df_meta_id, feature_cols)."""
     df = pd.read_csv(os.path.join(meta_dir, f"{split}_meta.csv"))
     # The meta file has class/label too; drop them so we only join on `input`.
     df = df.drop(columns=[c for c in ("class", "label") if c in df.columns])
     all_feature_cols = [c for c in df.columns if c not in _META_NON_FEATURE_COLS]
-    feature_cols = _select_meta_columns(all_feature_cols, categories)
+    feature_cols = _select_meta_columns(all_feature_cols, categories, explicit_columns)
     return df[["input"] + feature_cols], feature_cols
 
 
 def load_dataset(path, label_column, meta_dir=None, meta_categories=None,
-                 malicious_only=False):
+                 malicious_only=False, meta_columns=None):
     """Load train/dev/test plus (optionally) the metadata vectors aligned by `input`.
 
     When `meta_dir` is given, returns extra keys:
@@ -73,9 +94,9 @@ def load_dataset(path, label_column, meta_dir=None, meta_categories=None,
     if meta_dir is None:
         return out
 
-    meta_train, feature_cols = _load_meta(meta_dir, "train", meta_categories)
-    meta_dev,   _            = _load_meta(meta_dir, "dev",   meta_categories)
-    meta_test,  _            = _load_meta(meta_dir, "test",  meta_categories)
+    meta_train, feature_cols = _load_meta(meta_dir, "train", meta_categories, meta_columns)
+    meta_dev,   _            = _load_meta(meta_dir, "dev",   meta_categories, meta_columns)
+    meta_test,  _            = _load_meta(meta_dir, "test",  meta_categories, meta_columns)
 
     def _align(df_data, df_meta, split_name):
         before = len(df_data)

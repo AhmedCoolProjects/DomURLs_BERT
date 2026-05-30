@@ -93,11 +93,18 @@ def main(args):
         print("metadata fusion disabled (only supported for --experiment_type domain)")
 
     meta_categories = None
+    meta_columns = None
     if use_metadata:
         if not args.metadata_dir:
             raise ValueError("metadata fusion is enabled but --metadata_dir is empty. "
                              "Pass --no_metadata to disable or provide --metadata_dir.")
         meta_categories = [c.strip() for c in args.meta_categories.split(",") if c.strip()]
+        if args.meta_columns_file:
+            with open(args.meta_columns_file) as _f:
+                meta_columns = [ln.strip() for ln in _f
+                                if ln.strip() and not ln.strip().startswith("#")]
+            print(f"metadata: using {len(meta_columns)} explicit columns "
+                  f"from {args.meta_columns_file} (categories ignored)")
 
     if args.malicious_only and args.label_column == "label":
         raise ValueError("--malicious_only filters to label=='malicious', leaving only one "
@@ -110,6 +117,7 @@ def main(args):
         meta_dir=args.metadata_dir if use_metadata else None,
         meta_categories=meta_categories,
         malicious_only=args.malicious_only,
+        meta_columns=meta_columns,
     )
     df_train, df_dev, df_test, label_encoder = data_dict['train'], data_dict['dev'], data_dict['test'], data_dict['label_encoder']
     num_classes = len(label_encoder.classes_)
@@ -162,6 +170,7 @@ def main(args):
     "use_metadata": use_metadata,
     "meta_dim": meta_dim,
     "meta_categories": meta_categories,
+    "meta_columns_file": args.meta_columns_file,
     "meta_hidden_dim": args.meta_hidden_dim,
     "meta_out_dim": args.meta_out_dim,
     "fusion_mode": args.fusion_mode,
@@ -321,7 +330,12 @@ if __name__ == '__main__':
                         help='Directory containing {train,dev,test}_meta.csv')
     parser.add_argument('--meta_categories', type=str, default='rdap,dns,tls,ip',
                         help='Comma-separated metadata category prefixes to include '
-                             '(default: drop_x_ct, the round-2 ablation winner).')
+                             '(default: drop_x_ct, the round-2 ablation winner). '
+                             'Ignored when --meta_columns_file is provided.')
+    parser.add_argument('--meta_columns_file', type=str, default=None,
+                        help='Optional path to a text file with one metadata column name '
+                             'per line (e.g. keep_columns.txt from feature_step1_dead.py). '
+                             'When given, overrides --meta_categories.')
     parser.add_argument('--meta_hidden_dim', type=int, default=128,
                         help='Hidden dim of the metadata MLP')
     parser.add_argument('--meta_out_dim', type=int, default=64,
