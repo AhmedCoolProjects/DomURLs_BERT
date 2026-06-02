@@ -80,7 +80,7 @@ def main(args):
     # Set random seed
     seed_everything(seed=args.seed)
     # Set dataset path
-    path= f'data/{args.experiment_type}_datasets/{args.dataset}'
+    path= args.data_path if args.data_path else f'data/{args.experiment_type}_datasets/{args.dataset}'
     # Set the max sequence length
     if args.experiment_type == 'domain':
         max_length = 64
@@ -311,6 +311,9 @@ if __name__ == '__main__':
         
     parser = argparse.ArgumentParser(description="Train PLM-based models for malicious URL and domain names detection.")
     parser.add_argument('--dataset', type=str, default='Mendeley_AK_Singh_2020_phish', help='Dataset name')
+    parser.add_argument('--data_path', type=str, default=None,
+                        help='Direct path to the dataset directory containing train/dev/test.csv. '
+                             'Overrides the default data/{experiment_type}_datasets/{dataset} location.')
     parser.add_argument('--pretrained_path', type=str, default='amahdaouy/DomURLs_BERT', help='Pretrained model path')
     parser.add_argument('--num_workers', type=int, default=1, help='Number of workers for data loading')
     parser.add_argument('--dropout_prob', type=float, default=0.2, help='Dropout probability')
